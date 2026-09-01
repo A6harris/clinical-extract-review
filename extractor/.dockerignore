@@ -1,0 +1,14 @@
+  extractor:
+    build: ./extractor
+    environment:
+      EXTRACTOR_MODEL: stub
+    volumes:
+      - ./extractor:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5

@@ -1,0 +1,4 @@
+# extractor/requirements.txt
+fastapi
+uvicorn[standard]
+pydantic
