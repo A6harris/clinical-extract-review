@@ -1,4 +1,4 @@
-# CLAUDE.md — Faro-Extract
+# CLAUDE.md — Clinical Extract Review
 
 Read this file fully before your first response in any session. It defines how you
 work in this repo. The operating rules in Part 1 override your defaults.
@@ -42,10 +42,6 @@ That means:
 - **Do not run git commands.** Same reason.
 - Reading files, searching the repo, and looking at what I have written are always
   fine and are the point of you being here.
-
-I have been doing this project in a browser and the learning has been working. The
-only thing changing is that you can now read the code yourself, so I stop pasting
-files in and you stop guessing at what is on disk.
 
 If you think a file edit is genuinely the right call, ask. One line. Then wait.
 
@@ -119,6 +115,27 @@ out of it. Slow down in these specific ways:
 None of this means dumb it down or skip the hard parts. It means one thing at a
 time.
 
+### Keep me oriented in the whole stack
+
+**This is the main thing I need from you.** More than any individual detail.
+
+Start every chunk by placing it. Which service is this in, what calls it, what
+does it call, and what happens to the data after. One or two sentences before any
+detail.
+
+What I have to be able to do on Thursday is describe how the pieces fit together
+and why each boundary is where it is. Browser to Express. Express to Postgres.
+Express to FastAPI over the compose network and back. Compose wiring four
+containers into one system. If I can draw that and defend the seams, I am fine.
+
+Specific technical detail is a bonus and worth teaching, especially when it is a
+likely interview question. But do not trade my grasp of the whole system for a
+detail I will have forgotten by Wednesday. When you have a choice, spend the words
+on the connection, not the trivia.
+
+Keep quizzing me. The questions are how I find out I do not actually understand
+something. If an answer shows I have lost the thread on how a piece connects to
+the rest, stop correcting the detail and redraw the map first.
 
 ---
 
@@ -131,51 +148,130 @@ services.
 **Environment:** Windows, `cmd.exe`. Single quotes do not work for shell quoting.
 Use double quotes with escaped inner quotes in every command you give me.
 
-### Working
+**Watch mode does not work.** `tsx watch` never sees edits to `api/src`. Windows
+file change events do not cross the bind mount into the Linux container, so the
+watcher waits for an event that never arrives. The file on disk is always current,
+because `./api/src` is bind-mounted. It is the Node process that is stale.
 
-- **Postgres 16** in compose. Named volume `pgdata`, `pg_isready` healthcheck,
-  `./db/init` bind-mounted to `/docker-entrypoint-initdb.d`. Reports healthy.
-- **Schema** in `db/init/001_scheme.sql` (note: `scheme`, not `schema`). Four
-  tables as described above.
-- **Extractor** on port 8000, healthy. Deterministic regex stub.
-- **API container** on port 3000, boots clean.
-- **Compose is fixed.** `EXTRACTOR_URL` and `extractor: condition:
-  service_healthy` are both present and verified in `docker-compose.yml`.
-- **`errors.ts` and `db.ts` are wired in**, not pending. `index.ts` imports both.
-  `errorHandler` is registered last.
-- **Routes live:** `GET /health`, `POST /documents`, `GET /documents/:id`.
-- **`callExtractor` is written**, inline in `index.ts` by choice. It has
+**After every edit to `api/src`, run `docker compose restart api`.** Not `up -d`.
+`up` compares config, sees no diff, and reports `Running` without doing anything.
+This cost twenty minutes on Sep 1.
+
+**Do not rename the `C:\dev\faro` folder.** Compose derives the project name from
+the directory name and namespaces volumes by project name. Renaming the folder
+creates a new project with an empty `pgdata` volume and orphans the old one. The
+GitHub repo name is independent and gets chosen at `git remote add origin`.
+
+### Done and verified: Checkpoints 4, 5, and 6
+
+- **Postgres 16**, **extractor** on 8000, **api** on 3000. All healthy. Named
+  volume `pgdata`, `pg_isready` healthcheck, `./db/init` bind-mounted to
+  `/docker-entrypoint-initdb.d`.
+- **Schema** in `db/init/001_scheme.sql` (note `scheme`, not `schema`). Four
+  tables: `documents`, `extraction_runs`, `extracted_fields`, `field_corrections`.
+- **Compose is correct.** `EXTRACTOR_URL` and `extractor: condition:
+  service_healthy` both present and verified.
+- **`callExtractor`** is inline in `index.ts` by choice, with
   `AbortSignal.timeout(20_000)`, a non-strict Zod schema, a separate `try` around
-  `res.json()`, and `safeParse` so a bad shape becomes a 502 and not a 400.
-  `ExtractorError` lives in `errors.ts`. Verified by a clean container boot.
+  `res.json()`, and `safeParse` so a bad shape is a 502 and not a 400.
+  `ExtractorError` lives in `errors.ts`.
+- **`POST /documents/:id/extractions` works.** The `pending` run row is inserted
+  and committed before the extractor call, so a failure leaves evidence. On
+  success, one transaction updates the run to `succeeded` and inserts the five
+  fields together, so a succeeded-with-no-fields state is never observable.
+- **`prompt_version` and `model` use placeholder strings**, `'unknown'`, inserted
+  before the extractor answers and overwritten on success. Chosen over making the
+  columns nullable. Defense: `status` already distinguishes a failed run, so the
+  placeholder is never ambiguous in practice.
+- **`PATCH /extracted-fields/:id` works.** Append-only. There is no `update`
+  statement anywhere in the route, only an `insert` into `field_corrections`. It
+  does a `select` first so a missing field is a 404 rather than a foreign key 500,
+  then returns the field with `current_value` and `corrected` recomputed so the
+  shape matches what `GET /documents/:id` emits.
+- **The read path is proven.** `GET /documents/:id` uses a `DISTINCT ON`
+  subquery over `field_corrections` and `= any($1::uuid[])` for the fields, one
+  query for all runs rather than one per field.
+- **Full loop verified end to end by curl on Sep 1.** Created a document,
+  triggered extraction, got five fields, corrected `primary_diagnosis` twice, and
+  confirmed on the read path that `value` is still `null`, `current_value` is the
+  **second** correction, `corrected` is `true`, and the other four fields are
+  untouched. The second correction is what actually exercised `DISTINCT ON`. With
+  one correction the subquery would have returned the same answer with no
+  `distinct on` and no `order by` at all.
+- **`corrected_at` / `created_at` mismatch is fixed.** All references say
+  `created_at`, matching the schema.
+- **git.** Repo initialized Sep 1. `.gitignore` covers `node_modules/`, `dist/`,
+  `.env`, `.env.*`, `*.key`, and the Python artifacts. The `*.key` and `.env`
+  entries exist ahead of Checkpoint 8 on purpose.
 
-The `GET /documents/:id` route already contains the Checkpoint 5 read path, the
-`DISTINCT ON` subquery and `= any($1::uuid[])`. The read side got built before the
-write side.
+### Stale pending rows
+
+`POST /documents/:id/extractions` sweeps before inserting:
+
+    update extraction_runs set status = 'failed'
+    where status = 'pending' and created_at < now() - interval '5 minutes'
+
+Design decisions to be able to defend:
+
+- **On write, not a background job.** At this volume a timer is one more thing to
+  run and monitor. Would move to a background job at scale.
+- **Time is the signal, not row position.** An earlier idea was "replace any
+  pending rows behind the new one." That races: request B can mark request A's row
+  failed while A is still legitimately running. The five minute threshold, well
+  past the 20s timeout, makes that impossible.
+- **No `limit`.** A row-count window would let a stale row age out of range and
+  become invisible forever. The `where` clause is what keeps it cheap, not a limit.
+- **Known cost:** no index on `extraction_runs (status, created_at)`, so this is a
+  full table scan on every extraction. Fine at hundreds of rows. This is the honest
+  answer to question 4.
+- The `set status = 'failed'` in the catch block sits inside the
+  `instanceof ExtractorError` branch on purpose. The sweeper is the backstop for
+  everything else. The error path handles the failure it understands, the sweeper
+  handles the rest.
+
+### Checkpoint 7 done and verified, Sep 1
+
+- `docker compose stop extractor`. 502 in **2.8 seconds**. Failed at DNS: the
+  container is off the network, `extractor` does not resolve, the request died
+  before a TCP connection existed. The 2.8s is the resolver going upstream for an
+  NXDOMAIN. Wrapped error was `TypeError: fetch failed`.
+- `docker compose pause extractor`. 502 in **20.45 seconds**. SIGSTOP freezes the
+  process, not the kernel. The name still resolves, the handshake still completes,
+  nothing ever answers. Wrapped error was
+  `DOMException [TimeoutError]: The operation was aborted due to timeout`.
+- **The line for the room:** `stop` fails on its own. `pause` only fails because I
+  made it. The 20 seconds is a number I chose, not a number the network gave me.
+  Without `AbortSignal.timeout` on line 39 that request hangs forever and never
+  becomes an error at all. `fetch` has no default timeout.
+- Both left a `failed` run row with `unknown` / `unknown`.
+- **Sweeper verified.** Inserted a `pending` row backdated ten minutes, triggered a
+  normal extraction, and the pending count went from 1 to 0.
+- **Found a real bug in the logging.** The innermost error prints as `[cause]:
+  [Error]`. `console.error` defaults to depth 2 and the error nests three deep, so
+  the `errno` / `code` field, the single most useful one, is the one you cannot
+  see. Answer to "what would you fix before production."
 
 ### Known broken or messy
 
-- **The correction timestamp column is half fixed.** Schema says `created_at`.
-  `index.ts` line 52 was updated to match. Lines 48 and 54 still say
-  `corrected_at`. The query will fail the first time an extraction run exists.
-- **`api/env.yaml` is garbage.** An eight-line YAML fragment with no service and
-  broken indentation. It is the paste that caused the old compose blocker. Delete
-  it.
-- **Types are not checked at all.** No `@types/node`, no typecheck script. `tsx`
-  transpiles without checking, so `strict: true` in `tsconfig.json` does nothing
-  today. Good honest answer to question 19.
-- **Not a git repo.** Nothing is under version control.
+- - **Deleted `api/src/extractor.ts` on Sep 1.** Dead file nothing imported. It
+  exported a *second* `ExtractorError` class with the same name as the one in
+  `errors.ts`. Two distinct identities at runtime. If anything had thrown that one,
+  `err instanceof ExtractorError` in `index.ts` is `false`, the `failed` update is
+  skipped, and the run sits at `pending` forever. Worth naming: same name, same
+  shape, different class object, silent wrong branch.
+
+- **Types are not checked at all.** No `@types/node` in `api/package.json`, no
+  typecheck script, only a `dev` script. `tsx` transpiles without checking, so
+  `strict: true` in `tsconfig.json` does nothing today. This is the honest answer
+  to question 19.
+- **A field object in the `GET` response has a `created_at` that is the
+  correction's timestamp,** and it is `null` for uncorrected fields. It sits next
+  to a run `created_at` and a document `created_at` that mean different things.
+  Bad name, worth owning before she points at it.
 - `api/Dockerfile` uses `npm install`, should be `npm ci`.
 - `extractor/requirements.txt` is unpinned.
-
-### Open decision, blocking the next chunk
-
-`extraction_runs.prompt_version` and `.model` are `not null`. But the run row gets
-inserted as `pending` *before* the extractor is called, and both values only
-arrive in the extractor's response. Two options: placeholder strings like
-`'unknown'`, or make both columns nullable. Nullable is the recommendation, since
-null is what you actually mean. It costs a `docker compose down -v`, which is free
-right now because there is no data, and stops being free at Checkpoint 6.
+- Repo name on GitHub not chosen yet. Leaning descriptive rather than naming the
+  company.
 
 ---
 
@@ -183,56 +279,82 @@ right now because there is no data, and stops being free at Checkpoint 6.
 
 Nothing outside this list gets built.
 
-### Checkpoint 4 — API calls extractor
+**Checkpoints 1 through 6 are done.** Compose stack, schema, extractor stub, API
+calls extractor, corrections, and the full loop by curl. See Part 2.
 
-- Fix the compose YAML. Verify with `docker compose config` before `up -d`.
-  `up -d` should say `Recreated`.
-- `callExtractor` with `AbortSignal.timeout(20_000)`. `fetch` has no default
-  timeout, so without this a hung extractor hangs the request forever.
-- Zod-validate the extractor's response even though it is our own service,
-  because it deploys independently.
-- `POST /documents/:id/extractions`. Insert the `extraction_runs` row as `pending`
-  **before** calling the extractor, so a failure leaves evidence in the database.
-  On failure: mark `failed`, return 502. On success: update status and insert
-  fields inside one transaction, so a succeeded-with-no-fields state is never
-  observable.
+**Plan for Sep 1, a full day, aiming to finish everything tonight:**
+git and cleanup, then 7, then 8, then 9, then 10. Checkpoint 9 is the unknown and
+Checkpoint 8 is the first thing to cut if time runs out, because the stub already
+demos the full loop.
 
-### Checkpoint 5 — Corrections
+### **Checkpoint 7 is done.** See Part 2.
 
-- `PATCH /extracted-fields/:id` inserting into `field_corrections`. Append-only.
-  Never overwrite the extracted value. The corrections are the eval set.
-- Read path uses `DISTINCT ON` to get the latest correction per field.
-- Use `= any($1::uuid[])` rather than a query per field, to avoid N+1.
-- Naming: I should be ready to say why this is `PATCH /extracted-fields/:id`
-  rather than `POST /extracted-fields/:id/corrections`, and that the second is
-  arguably more honest given the append-only storage. Raise it proactively if I
-  do not.
+### Checkpoint 8 done and verified, Sep 2
 
-### Checkpoint 6 — Full loop by curl
+- `anthropic` 1.3.0 in the extractor. Key in root `.env`, injected by `env_file`
+  on the extractor service only. Never in `docker-compose.yml`.
+- `EXTRACTOR_MODEL` holds a **model id**, not a mode. `stub` takes the regex path,
+  anything else is passed straight to `client.messages.parse(model=...)`.
+  The Anthropic client is built only on the LLM path, so the stub runs with no
+  key at all. That is the point of the flag: the fallback must survive both a
+  dead network and a missing credential.
+- Structured output replaces `temperature`. `ExtractionResult` has five **named**
+  Pydantic fields, not a list. A list lets the model return four fields, six, or
+  a renamed one. Named keys make all five present and no others, enforced server
+  side.
+- The run row stores `response.model`, which came back
+  `claude-haiku-4-5-20251001`, not the `claude-haiku-4-5` in `.env`. Env var is
+  intent, `response.model` is what happened. Six months later only one of those
+  answers "which build produced this wrong value."
+- No fallback to the stub on an LLM failure. `raise HTTPException(502)` instead.
+  A regex answer stored in a row labeled `claude-haiku-4-5` would corrupt the
+  (predicted, actual) pairs the corrections table exists to collect.
+- Haiku over Opus: span extraction from a short note, not reasoning. Sized the
+  model to the task. Also runs in ~5s, well inside the 20s client timeout.
 
-Create document, trigger extraction, `GET` shows five fields, correct
-`primary_diagnosis`, `GET` shows the original value still `null` with
-`current_value` set and `corrected: true`.
+### Debugging lessons from Sep 2
 
-### Checkpoint 7 — Break it deliberately
+- **500 vs my own 502.** A 502 with a JSON body came from a `raise HTTPException`
+  I wrote: a failure I predicted. `Internal Server Error` as bare text is
+  FastAPI's outermost handler: a failure I did not predict, and it deliberately
+  tells the client nothing. The traceback is in `docker compose logs`, not the
+  response. That distinction is the first thing to check.
+- **`curl -s` hides connection errors.** `-s` suppresses the progress meter and
+  error messages. A blank line is not "the server returned nothing," it is curl
+  failing quietly. Use `-sS`. Same class of mistake as `console.error` truncating
+  at depth 2 and hiding `errno`: both times the tool suppressed the one field
+  that explained the failure.
+- **`curl: (52)` vs `(7)`.** 52 is connection accepted then closed with no bytes.
+  7 is refused. Right after `up -d` you get 52, because Docker's host-side port
+  forwarder accepts the moment the container exists, before anything inside is
+  listening. `up -d` returns when the container starts, not when the process is
+  ready. The compose healthcheck knows the difference; my shell does not.
+- **`uvicorn --reload` is decorative here.** `watchfiles` waits for a filesystem
+  event that never crosses the Windows bind mount, exactly like `tsx watch`.
+  The extractor has the same rule as the api: `docker compose restart extractor`
+  after every edit to `main.py`.
+- **A 404 from `/v1/messages` means two things you cannot tell apart.** The model
+  id is misspelled, or the id is valid and my key's org cannot call it. Only the
+  message body separates them.
 
-- `docker compose stop extractor` for fast failure. Expect 502 and a run row at
-  `failed`.
-- `docker compose pause extractor` for slow failure, so the timeout actually
-  fires. These two are different code paths and I should be able to say why.
+### Known broken or messy (additions)
 
-### Checkpoint 8 — Swap the regex stub for a real LLM call
+- `except anthropic.APIError` logs only `type(err).__name__` and throws the
+  message away. That is why the 404 above is ambiguous in my own logs. Small,
+  real, and mine.
+- **The fields query has no `order by`.** `GET /documents/:id` returned the five
+  fields in Postgres plan order, not insert order. The React table will render
+  rows in an order that can change between deploys. Fix before Checkpoint 9.
+- **`confidence` arrives as a string.** `"0.900"`, quoted, from `numeric(4,3)`.
+  Any numeric method on it in React fails.
 
-- Structured output, temperature near zero.
-- Prompt version stored on the `extraction_runs` row. It is already a column.
-- Keep the stub reachable behind an env flag so the demo cannot fail live on a
-  network call.
 
 ### Checkpoint 9 — React review screen
 
-One screen. Paste text, hit extract, see fields in a table, edit a field inline,
-save. Plus the failure states: loading, extraction failed, low confidence. The
-failure states are the customer-centric part and they are cheap to build.
+Vite is not started. One screen. Paste text, hit extract, see fields in a table,
+edit a field inline, save. Plus the failure states: loading, extraction failed,
+low confidence. The failure states are the customer-centric part and they are
+cheap to build.
 
 ### Checkpoint 10 — README
 
@@ -250,6 +372,8 @@ pagination, search, filtering, styling beyond legible.
 
 Do not re-teach these. Do test me on them cold.
 
+### Infrastructure and Docker
+
 - Docker layer caching, observed in both ecosystems. `pip install` 27s cold,
   cached on a source-only rebuild.
 - Healthcheck states: absent vs starting vs healthy vs unhealthy, and what
@@ -257,35 +381,135 @@ Do not re-teach these. Do test me on them cold.
 - `restart` vs `up -d`. Restart keeps the old config. `up` recreates on diff.
 - Compose service-name DNS vs `localhost` inside a container.
 - `docker compose config` as a pre-flight. YAML has no closing tokens and no
-  duplicate-key protection. Two failures on Saturday were structurally valid files
-  that meant something other than what was written.
+  duplicate-key protection. Two failures were structurally valid files that meant
+  something other than what was written.
 - `npm ci` vs `npm install`.
-- `asyncRoute` and four-argument error middleware.
-- Pool client release in `finally`.
-- Schema rationale: why `extraction_runs` is its own table, why corrections are
-  stored rather than overwritten, why not one JSONB blob, what I would index and
-  what that costs.
-### Banked this session (Aug 31)
-
 - SIGTERM vs SIGKILL. Signal 15 can be caught, signal 9 cannot. Docker sends
   SIGTERM on stop, waits 10s, then SIGKILL. PID 1 in the api container is `npm`,
   which is why a normal shutdown prints `npm error signal SIGTERM`.
 - This app has no SIGTERM handler, so a deploy drops in-flight requests. Not on
   the scope list. Good answer to "what would you do before production."
+- Bind mounts. The container reads the host file directly, so a source file is
+  never stale. Only the process is. This is why `restart` fixes it and `up -d`
+  does not: `up` diffs config, and a source edit is not part of the config.
+- Compose namespaces volumes by project name and the project name defaults to the
+  directory name, so renaming a checkout silently orphans the database.
+
+### API and data
+
+- `asyncRoute` and four-argument error middleware.
+- Pool client release in `finally`.
+- Schema rationale: why `extraction_runs` is its own table, why corrections are
+  stored rather than overwritten, why not one JSONB blob, what I would index and
+  what that costs.
 - `depends_on: condition: service_healthy` is a startup gate only. It does nothing
   at request time. A timeout in the client is the only real protection.
 - Why the `pending` run row is committed before the extractor call: a failure has
   to leave evidence.
+- Stale `pending` rows. `pending` means two things you cannot tell apart from the
+  row alone: running now, or abandoned. Time is the only signal that separates
+  them. Any cleanup keyed on row position instead of age has a race.
+- The one case no catch block can cover is the process dying between the pending
+  insert and the update. Not an exception, death. SIGKILL, OOM, container killed.
+  That is the only thing a sweeper exists for.
+- `IdParam.parse` returns a clean 400 with a Zod message on a malformed uuid. Bad
+  input never reaches Postgres. Verified by curling `DOC_ID` as a literal.
+- **Why Zod-validate a response from a service we wrote ourselves.** Answered
+  correctly on Sep 1 after three earlier misses. Pydantic proves the extractor
+  agrees with itself. Zod proves the extractor still agrees with the API. They are
+  two schemas with two owners over one wire. Concrete case: someone renames
+  `field_name` to `name` in `main.py` and redeploys only the extractor. Pydantic
+  accepts it. Zod rejects it. Without Zod you insert `undefined`, hit a not-null
+  violation, and spend twenty minutes debugging the wrong container. The point is
+  not that Zod prevents the failure. It moves the failure to the boundary where
+  the cause is obvious.
+- **The advisory existence check in `PATCH /extracted-fields/:id`.** The `select`
+  and the `insert` are not in a transaction. If the field is deleted in between,
+  the insert hits the foreign key, Postgres raises 23503, that is not an
+  `HttpError`, and the client gets a 500 instead of a 404. The right framing is
+  not "is there a race" but "what does the race cost." The foreign key is the real
+  guarantee, the `select` is only there to produce a better status code, no
+  corrupt row can ever be written, and nothing in this app deletes an
+  `extracted_field` anyway. A transaction would not fix it, it would only change
+  which error surfaces.
 
 ### Answered badly, re-test cold
+### Checkpoint 8 done and verified, Sep 2
 
-- **Why Zod-validate a response from a service we wrote ourselves.** Missed three
-  times on Aug 31. The wrong answer is "double checking." The right answer:
-  pydantic proves the extractor agrees with itself, Zod proves the extractor still
-  agrees with the API. Concrete case: someone renames `field_name` to `name` in
-  `main.py` and redeploys only the extractor. Pydantic accepts it. Zod rejects it.
-  Without Zod you insert `undefined`, hit a not-null violation, and spend twenty
-  minutes debugging the wrong container.
+- `anthropic` 1.3.0 in the extractor. Key in root `.env`, injected by `env_file`
+  on the extractor service only. Never in `docker-compose.yml`.
+- `EXTRACTOR_MODEL` holds a **model id**, not a mode. `stub` takes the regex path,
+  anything else is passed straight to `client.messages.parse(model=...)`.
+  The Anthropic client is built only on the LLM path, so the stub runs with no
+  key at all. That is the point of the flag: the fallback must survive both a
+  dead network and a missing credential.
+- Structured output replaces `temperature`. `ExtractionResult` has five **named**
+  Pydantic fields, not a list. A list lets the model return four fields, six, or
+  a renamed one. Named keys make all five present and no others, enforced server
+  side.
+- The run row stores `response.model`, which came back
+  `claude-haiku-4-5-20251001`, not the `claude-haiku-4-5` in `.env`. Env var is
+  intent, `response.model` is what happened. Six months later only one of those
+  answers "which build produced this wrong value."
+- No fallback to the stub on an LLM failure. `raise HTTPException(502)` instead.
+  A regex answer stored in a row labeled `claude-haiku-4-5` would corrupt the
+  (predicted, actual) pairs the corrections table exists to collect.
+- Haiku over Opus: span extraction from a short note, not reasoning. Sized the
+  model to the task. Also runs in ~5s, well inside the 20s client timeout.
+
+### Debugging lessons from Sep 2
+
+- **500 vs my own 502.** A 502 with a JSON body came from a `raise HTTPException`
+  I wrote: a failure I predicted. `Internal Server Error` as bare text is
+  FastAPI's outermost handler: a failure I did not predict, and it deliberately
+  tells the client nothing. The traceback is in `docker compose logs`, not the
+  response. That distinction is the first thing to check.
+- **`curl -s` hides connection errors.** `-s` suppresses the progress meter and
+  error messages. A blank line is not "the server returned nothing," it is curl
+  failing quietly. Use `-sS`. Same class of mistake as `console.error` truncating
+  at depth 2 and hiding `errno`: both times the tool suppressed the one field
+  that explained the failure.
+- **`curl: (52)` vs `(7)`.** 52 is connection accepted then closed with no bytes.
+  7 is refused. Right after `up -d` you get 52, because Docker's host-side port
+  forwarder accepts the moment the container exists, before anything inside is
+  listening. `up -d` returns when the container starts, not when the process is
+  ready. The compose healthcheck knows the difference; my shell does not.
+- **`uvicorn --reload` is decorative here.** `watchfiles` waits for a filesystem
+  event that never crosses the Windows bind mount, exactly like `tsx watch`.
+  The extractor has the same rule as the api: `docker compose restart extractor`
+  after every edit to `main.py`.
+- **A 404 from `/v1/messages` means two things you cannot tell apart.** The model
+  id is misspelled, or the id is valid and my key's org cannot call it. Only the
+  message body separates them.
+
+### Known broken or messy (additions)
+
+- `except anthropic.APIError` logs only `type(err).__name__` and throws the
+  message away. That is why the 404 above is ambiguous in my own logs. Small,
+  real, and mine.
+- **The fields query has no `order by`.** `GET /documents/:id` returned the five
+  fields in Postgres plan order, not insert order. The React table will render
+  rows in an order that can change between deploys. Fix before Checkpoint 9.
+- **`confidence` arrives as a string.** `"0.900"`, quoted, from `numeric(4,3)`.
+  Any numeric method on it in React fails.
+
+
+-- **Why `stop` failed in 2.8s and `pause` took 20.4s.** Went vague twice on Sep 1.
+  Said "the new data didn't have endpoint" and "pause just timed out." Neither
+  names the mechanism. Re-test cold.
+
+- **Why corrections are stored as new rows instead of updating the value in
+  place.** Went vague on Sep 1, which is bad because this is my own field. The
+  weak answer is "training data to make the model better." Two problems: there is
+  no reason column, so I cannot claim I know *why* it was wrong, and retraining is
+  not the near-term use. The real answer is evaluation. There is no labeled data
+  for this task and no budget to make any. A reviewer fixing `primary_diagnosis`
+  produces a ground-truth label as a byproduct of work they were already doing.
+  What makes it a label is the **pair**: the model said `null`, the truth was
+  `Type 2 diabetes mellitus`. Overwrite the row and you keep the truth and destroy
+  the pair, and the pair is the entire signal. A table of correct diagnoses
+  measures nothing. A table of (predicted, actual) is an eval set that grows every
+  day the product is used, for free. This is also the answer to question 16.
 
 ---
 
@@ -322,6 +546,12 @@ Pull from this after chunks. Prefer the ones that touch code we just wrote.
 **Judgment**
 19. What is the worst decision in this codebase?
 20. What would you build next, and what would you refuse to build?
+
+**Whole system**
+21. Draw the request path for "user pastes a note and clicks extract." Every hop.
+22. Why is the API in Node and the extractor in Python? What would you lose by
+    collapsing them into one service?
+23. Where are the trust boundaries in this system, and what validates at each one?
 
 The useful signal is not whether I get these right. It is whether I go vague.
 Flag every answer where I started using words instead of specifics.

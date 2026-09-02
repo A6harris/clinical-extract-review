@@ -6,7 +6,23 @@ import { asyncRoute, errorHandler, HttpError, ExtractorError } from "./errors.js
 
 
 const app = express();
+
+// CORS. Must sit above the routes: a preflight has to be answered here,
+// not walked down into a route that does not exist for OPTIONS.
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "http://localhost:5173");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "content-type");
+
+  if (req.method === "OPTIONS") {
+    res.sendStatus(204);
+    return;
+  }
+  next();
+});
+
 app.use(express.json({ limit: "1mb" }));
+
 
 const IdParam = z.object({ id: z.string().uuid() });
 const CreateDocument = z.object({
@@ -16,6 +32,17 @@ const CreateDocument = z.object({
 const CreateCorrection = z.object({
   corrected_value: z.string().min(1).max(10_000),
 });
+
+// Presentation order for the review table. Mirrors FIELD_NAMES in
+// extractor/main.py. A field name missing from this list sorts last.
+const FIELD_ORDER = [
+  "patient_age",
+  "primary_diagnosis",
+  "admission_date",
+  "discharge_date",
+  "disposition",
+];
+
 
 
 const ExtractorResponse = z.object({
@@ -98,19 +125,22 @@ app.get("/documents/:id", asyncRoute(async (req, res) => {
 
   const fields = runIds.length
     ? await pool.query(
-        `select f.id, f.run_id, f.field_name, f.value, f.confidence,
+        `select f.id, f.run_id, f.field_name, f.value,
+                f.confidence::float8 as confidence,
                 c.corrected_value, c.created_at
-         from extracted_fields f
-         left join (
-           select distinct on (extracted_field_id)
+          from extracted_fields f
+          left join (
+            select distinct on (extracted_field_id)
                   extracted_field_id, corrected_value, created_at
-           from field_corrections
-           order by extracted_field_id, created_at desc
-         ) c on c.extracted_field_id = f.id
-         where f.run_id = any($1::uuid[])`,
-        [runIds]
+            from field_corrections
+            order by extracted_field_id, created_at desc
+          ) c on c.extracted_field_id = f.id
+          where f.run_id = any($1::uuid[])
+          order by array_position($2::text[], f.field_name)`,
+        [runIds, FIELD_ORDER]
       )
     : { rows: [] };
+
 
   res.json({
     ...doc.rows[0],
@@ -213,7 +243,6 @@ app.patch("/extracted-fields/:id", asyncRoute(async (req, res) => {
 app.use(errorHandler);
 
 
-app.use(errorHandler);
 
 const port = Number(process.env.PORT ?? 3000);
 app.listen(port, () => console.log(`api listening on ${port}`));
