@@ -17,6 +17,11 @@ export default function App() {
   const [sourceText, setSourceText] = useState("");
   const [state, setState] = useState<State>({ status: "idle" });
 
+    async function refresh(documentId: string) {
+    const doc = await getDocument(documentId);
+    setState({ status: "ready", doc });
+  }
+
   async function handleExtract() {
     setState({ status: "extracting" });
 
@@ -66,7 +71,10 @@ export default function App() {
             Run {state.doc.runs[0]?.status} using {state.doc.runs[0]?.model} (
             {state.doc.runs[0]?.prompt_version})
           </p>
-          <FieldTable fields={state.doc.runs[0]?.fields ?? []} />
+          <FieldTable
+            fields={state.doc.runs[0]?.fields ?? []}
+            onSaved={() => refresh(state.doc.id)}
+          />
         </>
       )}
 
