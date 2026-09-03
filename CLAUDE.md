@@ -434,64 +434,26 @@ Do not re-teach these. Do test me on them cold.
   which error surfaces.
 
 ### Answered badly, re-test cold
-### Checkpoint 8 done and verified, Sep 2
+- **Why `pg` returns `numeric` as a string.** Did not know it on Sep 2. Postgres
+  `numeric` is arbitrary precision, a JS number is a 53-bit double, so some values
+  cannot survive the conversion. The driver refuses to convert and hands back the
+  exact decimal as text. Same reason `bigint` comes back as a string. The framing:
+  correct data in an inconvenient type, over a convenient type with silent
+  corruption. Same instinct as the corrections table.
+  Note what breaks in React and what does not: `"0.900" < 0.5` works by coercion,
+  `.toFixed()` throws, `=== 0.9` is silently false. The mix is the hazard.
 
-- `anthropic` 1.3.0 in the extractor. Key in root `.env`, injected by `env_file`
-  on the extractor service only. Never in `docker-compose.yml`.
-- `EXTRACTOR_MODEL` holds a **model id**, not a mode. `stub` takes the regex path,
-  anything else is passed straight to `client.messages.parse(model=...)`.
-  The Anthropic client is built only on the LLM path, so the stub runs with no
-  key at all. That is the point of the flag: the fallback must survive both a
-  dead network and a missing credential.
-- Structured output replaces `temperature`. `ExtractionResult` has five **named**
-  Pydantic fields, not a list. A list lets the model return four fields, six, or
-  a renamed one. Named keys make all five present and no others, enforced server
-  side.
-- The run row stores `response.model`, which came back
-  `claude-haiku-4-5-20251001`, not the `claude-haiku-4-5` in `.env`. Env var is
-  intent, `response.model` is what happened. Six months later only one of those
-  answers "which build produced this wrong value."
-- No fallback to the stub on an LLM failure. `raise HTTPException(502)` instead.
-  A regex answer stored in a row labeled `claude-haiku-4-5` would corrupt the
-  (predicted, actual) pairs the corrections table exists to collect.
-- Haiku over Opus: span extraction from a short note, not reasoning. Sized the
-  model to the task. Also runs in ~5s, well inside the 20s client timeout.
+- **Why a `-> List[ExtractedField]` annotation did not catch a `None` return.**
+  Answered a different question on Sep 2. Python annotations are not enforced at
+  runtime; only mypy or pyright read them, and there is no mypy here. Identical to
+  `strict: true` in `tsconfig.json` doing nothing because `tsx` transpiles without
+  checking. Annotations present, checker absent, in both services. Pydantic did
+  catch it, but at model construction, sixty lines downstream of the real bug.
 
-### Debugging lessons from Sep 2
-
-- **500 vs my own 502.** A 502 with a JSON body came from a `raise HTTPException`
-  I wrote: a failure I predicted. `Internal Server Error` as bare text is
-  FastAPI's outermost handler: a failure I did not predict, and it deliberately
-  tells the client nothing. The traceback is in `docker compose logs`, not the
-  response. That distinction is the first thing to check.
-- **`curl -s` hides connection errors.** `-s` suppresses the progress meter and
-  error messages. A blank line is not "the server returned nothing," it is curl
-  failing quietly. Use `-sS`. Same class of mistake as `console.error` truncating
-  at depth 2 and hiding `errno`: both times the tool suppressed the one field
-  that explained the failure.
-- **`curl: (52)` vs `(7)`.** 52 is connection accepted then closed with no bytes.
-  7 is refused. Right after `up -d` you get 52, because Docker's host-side port
-  forwarder accepts the moment the container exists, before anything inside is
-  listening. `up -d` returns when the container starts, not when the process is
-  ready. The compose healthcheck knows the difference; my shell does not.
-- **`uvicorn --reload` is decorative here.** `watchfiles` waits for a filesystem
-  event that never crosses the Windows bind mount, exactly like `tsx watch`.
-  The extractor has the same rule as the api: `docker compose restart extractor`
-  after every edit to `main.py`.
-- **A 404 from `/v1/messages` means two things you cannot tell apart.** The model
-  id is misspelled, or the id is valid and my key's org cannot call it. Only the
-  message body separates them.
-
-### Known broken or messy (additions)
-
-- `except anthropic.APIError` logs only `type(err).__name__` and throws the
-  message away. That is why the 404 above is ambiguous in my own logs. Small,
-  real, and mine.
-- **The fields query has no `order by`.** `GET /documents/:id` returned the five
-  fields in Postgres plan order, not insert order. The React table will render
-  rows in an order that can change between deploys. Fix before Checkpoint 9.
-- **`confidence` arrives as a string.** `"0.900"`, quoted, from `numeric(4,3)`.
-  Any numeric method on it in React fails.
+- **Pattern to watch in myself.** On the annotation question I reached for a banked
+  talking point (Pydantic vs Zod, two schemas two owners) instead of reading what
+  was asked. Nothing had crossed the wire. Check what the question is before
+  answering from the bank.
 
 
 -- **Why `stop` failed in 2.8s and `pause` took 20.4s.** Went vague twice on Sep 1.
